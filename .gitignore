@@ -14,3 +14,9 @@ venv/
 
 # Environment variables
 .env
+
+debug_crops
+
+debug_snapshots
+
+temp_audio.wav
