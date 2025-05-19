@@ -5,17 +5,26 @@ import wave
 import contextlib
 from pydub import AudioSegment
 import os
+import mediapipe as mp
+from collections import deque
 
-# Update paths to the model files
-prototxt_path = "models/deploy.prototxt"
-model_path = "models/res10_300x300_ssd_iter_140000_fp16.caffemodel"
+# Initialize MediaPipe Face Detection
+mp_face_detection = mp.solutions.face_detection
+mp_drawing = mp.solutions.drawing_utils
+
+# Constants
 temp_audio_path = "temp_audio.wav"
-
-# Load DNN model
-net = cv2.dnn.readNetFromCaffe(prototxt_path, model_path)
+FACE_DETECTION_CONFIDENCE = 0.5
+MIN_FACE_SIZE = 0.1  # Minimum face size relative to frame size
+MAX_FACE_SIZE = 0.8  # Maximum face size relative to frame size
+FACE_TRACKING_HISTORY = 10  # Number of frames to keep in tracking history
 
 # Initialize VAD
 vad = webrtcvad.Vad(2)  # Aggressiveness mode from 0 to 3
+
+# Face tracking state
+tracked_face = None
+face_history = deque(maxlen=FACE_TRACKING_HISTORY)
 
 def voice_activity_detection(audio_frame, sample_rate=16000):
     return vad.is_speech(audio_frame, sample_rate)
@@ -37,8 +46,8 @@ global Frames
 Frames = [] # [x,y,w,h]
 
 def detect_faces_and_speakers(input_video_path, output_video_path):
-    # Return Frams:
-    global Frames
+    global Frames, tracked_face, face_history
+    
     # Extract audio from the video
     extract_audio_from_video(input_video_path, temp_audio_path)
 
@@ -48,90 +57,158 @@ def detect_faces_and_speakers(input_video_path, output_video_path):
         audio_data = wf.readframes(wf.getnframes())
 
     cap = cv2.VideoCapture(input_video_path)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video_path, fourcc, 30.0, (int(cap.get(3)), int(cap.get(4))))
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
 
     frame_duration_ms = 30  # 30ms frames
     audio_generator = process_audio_frame(audio_data, sample_rate, frame_duration_ms)
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        h, w = frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-        net.setInput(blob)
-        detections = net.forward()
-
-        audio_frame = next(audio_generator, None)
-        if audio_frame is None:
-            break
-        is_speaking_audio = voice_activity_detection(audio_frame, sample_rate)
-        MaxDif = 0
-        Add = []
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > 0.3:  # Confidence threshold
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                (x, y, x1, y1) = box.astype("int")
-                face_width = x1 - x
-                face_height = y1 - y
-
-                # Draw bounding box
-                cv2.rectangle(frame, (x, y), (x1, y1), (0, 255, 0), 2)
-
-                # Assuming lips are approximately at the bottom third of the face
-                lip_distance = abs((y + 2 * face_height // 3) - (y1))
-                Add.append([[x, y, x1, y1], lip_distance])
-
-                MaxDif == max(lip_distance, MaxDif)
-        # Track the active speaker's face coordinates
-        active_speaker_face = None
+    
+    # Initialize face detection
+    with mp_face_detection.FaceDetection(
+        model_selection=1,  # 1 for short-range, 0 for long-range
+        min_detection_confidence=FACE_DETECTION_CONFIDENCE
+    ) as face_detection:
         
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > 0.3:  # Confidence threshold
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                (x, y, x1, y1) = box.astype("int")
-                face_width = x1 - x
-                face_height = y1 - y
-
-                # Draw bounding box
-                cv2.rectangle(frame, (x, y), (x1, y1), (0, 255, 0), 2)
-
-                # Assuming lips are approximately at the bottom third of the face
-                lip_distance = abs((y + 2 * face_height // 3) - (y1))
-                print(lip_distance)
-
-                # Combine visual and audio cues
-                if lip_distance >= MaxDif and is_speaking_audio:  # Adjust the threshold as needed
-                    cv2.putText(frame, "Active Speaker", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    active_speaker_face = [x, y, x1, y1]  # Save the active speaker's face
+        frame_count = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
                 
-                if lip_distance >= MaxDif:
-                    if not active_speaker_face:  # If no active speaker was detected, use this face
-                        active_speaker_face = [x, y, x1, y1]
-                    break
-
-        # If no faces were detected at all, use a default box in the middle of the frame
-        if detections.shape[2] == 0 or active_speaker_face is None:
-            center_x = w // 2
-            center_y = h // 2
-            box_width = w // 3
-            box_height = h // 3
-            active_speaker_face = [center_x - box_width//2, center_y - box_height//2, 
-                                  center_x + box_width//2, center_y + box_height//2]
+            frame_count += 1
+            h, w = frame.shape[:2]
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Get audio data for this frame
+            audio_frame = next(audio_generator, None) if frame_count % (fps * frame_duration_ms / 1000) < 1 else None
+            is_speaking_audio = voice_activity_detection(audio_frame, sample_rate) if audio_frame is not None else False
+            
+            # Detect faces using MediaPipe
+            results = face_detection.process(rgb_frame)
+            
+            # Reset face tracking if no faces detected
+            if not results.detections:
+                tracked_face = None
+                face_history.clear()
+                
+            # Process detected faces
+            faces = []
+            if results.detections:
+                for detection in results.detections:
+                    # Get face bounding box
+                    bboxC = detection.location_data.relative_bounding_box
+                    ih, iw, _ = frame.shape
+                    x, y, w_face, h_face = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
+                                         int(bboxC.width * iw), int(bboxC.height * ih)
+                    
+                    # Skip faces that are too small or too large
+                    face_size = (w_face * h_face) / (frame_width * frame_height)
+                    if face_size < MIN_FACE_SIZE or face_size > MAX_FACE_SIZE:
+                        continue
+                        
+                    # Get face landmarks for mouth detection
+                    keypoints = detection.location_data.relative_keypoints
+                    if len(keypoints) > 3:  # Ensure we have mouth landmarks
+                        mouth_top = keypoints[3].y * ih
+                        mouth_bottom = keypoints[4].y * ih
+                        mouth_openness = abs(mouth_bottom - mouth_top)
+                    else:
+                        mouth_openness = 0
+                        
+                    # Calculate face center and size
+                    face_center = (x + w_face // 2, y + h_face // 2)
+                    face_size = (w_face + h_face) / 2
+                    
+                    faces.append({
+                        'bbox': (x, y, x + w_face, y + h_face),
+                        'center': face_center,
+                        'size': face_size,
+                        'mouth_openness': mouth_openness,
+                        'confidence': detection.score[0]
+                    })
+            
+            # Track the most likely speaker
+            active_face = None
+            
+            if faces:
+                # If we have a tracked face, try to match it
+                if tracked_face is not None:
+                    # Find the face closest to the tracked face
+                    min_dist = float('inf')
+                    for face in faces:
+                        dist = np.linalg.norm(np.array(face['center']) - np.array(tracked_face['center']))
+                        if dist < min_dist:
+                            min_dist = dist
+                            active_face = face
+                    
+                    # If no good match, use the face with most movement (speaking)
+                    if min_dist > tracked_face['size'] * 0.5:  # Threshold for face tracking
+                        active_face = max(faces, key=lambda f: f['mouth_openness'])
+                else:
+                    # No tracked face, use the most prominent face
+                    active_face = max(faces, key=lambda f: f['confidence'])
+                
+                # Update tracked face
+                tracked_face = active_face.copy()
+                face_history.append(active_face)
+                
+                # If we have audio, use it to confirm the speaker
+                if is_speaking_audio and len(face_history) > 1:
+                    # Find the face with most mouth movement
+                    speaking_face = max(faces, key=lambda f: f['mouth_openness'])
+                    if speaking_face['mouth_openness'] > 5:  # Threshold for mouth movement
+                        active_face = speaking_face
+            
+            # If no active face, use the last known position or center of frame
+            if active_face is None:
+                if face_history:
+                    # Use the last known position
+                    active_face = face_history[-1]
+                else:
+                    # Default to center of frame
+                    center_x, center_y = frame_width // 2, frame_height // 2
+                    box_size = min(frame_width, frame_height) // 3
+                    active_face = {
+                        'bbox': (center_x - box_size//2, center_y - box_size//2,
+                               center_x + box_size//2, center_y + box_size//2),
+                        'center': (center_x, center_y),
+                        'size': box_size
+                    }
+            
+            # Draw debug information
+            x1, y1, x2, y2 = active_face['bbox']
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            if is_speaking_audio:
+                cv2.putText(frame, "SPEAKING", (x1, y1 - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Store the face coordinates
+            Frames.append([x1, y1, x2, y2])
+            
+            # Write the frame
+            out.write(frame)
+            
+            # Print progress
+            if frame_count % 30 == 0:  # Every second at 30fps
+                print(f"Processed {frame_count} frames")
         
-        # Append the face coordinates to the Frames list
-        Frames.append(active_speaker_face)
+        cap.release()
+        out.release()
+        
+        # Clean up
+        try:
+            if os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+        except Exception as e:
+            print(f"Warning: Could not remove temporary file: {e}")
 
-        # Write the frame to the output file without trying to show it
-        out.write(frame)
-
-    cap.release()
-    out.release()
-    os.remove(temp_audio_path)
+    # All cleanup already handled above
+    # No need to release cap and out again or remove temp_audio_path again
 
 
 

@@ -4,109 +4,123 @@ from moviepy.editor import *
 from Components.Speaker import detect_faces_and_speakers, Frames
 global Fps
 
-def crop_to_vertical(input_video_path, output_video_path):
+def crop_to_vertical(input_video_path, output_video_path, target_aspect_ratio=9/16):
+    """
+    Crop video to vertical format (9:16) while keeping the active speaker in frame.
+    No padding is added - only horizontal movement of the crop window.
+    
+    Args:
+        input_video_path (str): Path to input video
+        output_video_path (str): Path to save output video
+        target_aspect_ratio (float): Target aspect ratio (width/height)
+    """
+    # First detect all faces and speakers in the video
+    print("Detecting faces and speakers...")
     detect_faces_and_speakers(input_video_path, "DecOut.mp4")
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
+    
+    # Open the video file
     cap = cv2.VideoCapture(input_video_path, cv2.CAP_FFMPEG)
     if not cap.isOpened():
-        print("Error: Could not open video.")
-        return
-
+        print("❌ Error: Could not open video file")
+        return False
+    
+    # Get video properties
     original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    vertical_height = int(original_height)
-    vertical_width = int(vertical_height * 9 / 16)
-    print(vertical_height, vertical_width)
-
-
-    if original_width < vertical_width:
-        print("Error: Original video width is less than the desired vertical width.")
-        return
-
-    x_start = (original_width - vertical_width) // 2
-    x_end = x_start + vertical_width
-    print(f"start and end - {x_start} , {x_end}")
-    print(x_end-x_start)
-    half_width = vertical_width // 2
-
+    
+    # Calculate target dimensions (maintain original height, adjust width for 9:16)
+    target_height = original_height
+    target_width = int(target_height * target_aspect_ratio)
+    
+    # Ensure target width doesn't exceed original width
+    if target_width > original_width:
+        target_width = original_width
+        print(f"⚠️ Warning: Original width ({original_width}px) is less than target width ({target_width}px)")
+        print(f"Using maximum possible width: {target_width}px")
+    
+    print(f"Original resolution: {original_width}x{original_height}")
+    print(f"Cropping to: {target_width}x{target_height} (Aspect: ~{target_aspect_ratio:.2f})")
+    
+    # Initialize video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (vertical_width, vertical_height))
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (target_width, target_height))
+    
+    # Store FPS as global for later use in combine_videos
     global Fps
     Fps = fps
-    print(fps)
-    count = 0
-    for _ in range(total_frames):
+    
+    # Track previous crop position for smooth transitions
+    prev_crop_x = (original_width - target_width) // 2
+    
+    # Process each frame
+    for frame_idx in range(total_frames):
         ret, frame = cap.read()
         if not ret:
-            print("Error: Could not read frame.")
+            print(f"⚠️ Warning: Could not read frame {frame_idx}")
             break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-        if len(faces) >-1:
-            if len(faces) == 0:
-                (x, y, w, h) = Frames[count]
-
-            # (x, y, w, h) = faces[0]  
-            try:
-                #check if face 1 is active
-                (X, Y, W, H) = Frames[count]
-            except Exception as e:
-                print(e)
-                (X, Y, W, H) = Frames[count][0]
-                print(Frames[count][0])
-            
-            for f in faces:
-                x1, y1, w1, h1 = f
-                center = x1+ w1//2
-                if center > X and center < X+W:
-                    x = x1
-                    y = y1
-                    w = w1
-                    h = h1
-                    break
-
-            # print(faces[0])
-            centerX = x+(w//2)
-            print(centerX)
-            print(x_start - (centerX - half_width))
-            if count == 0 or (x_start - (centerX - half_width)) <1 :
-                ## IF dif from prev fram is low then no movement is done
-                pass #use prev vals
-            else:
-                x_start = centerX - half_width
-                x_end = centerX + half_width
-
-
-                if int(cropped_frame.shape[1]) != x_end- x_start:
-                    if x_end < original_width:
-                        x_end += int(cropped_frame.shape[1]) - (x_end-x_start)
-                        if x_end > original_width:
-                            x_start -= int(cropped_frame.shape[1]) - (x_end-x_start)
-                    else:
-                        x_start -= int(cropped_frame.shape[1]) - (x_end-x_start)
-                        if x_start < 0:
-                            x_end += int(cropped_frame.shape[1]) - (x_end-x_start)
-                    print("Frame size inconsistant")
-                    print(x_end- x_start)
-
-        count += 1
-        cropped_frame = frame[:, x_start:x_end]
-        if cropped_frame.shape[1] == 0:
-            x_start = (original_width - vertical_width) // 2
-            x_end = x_start + vertical_width
-            cropped_frame = frame[:, x_start:x_end]
         
-        print(cropped_frame.shape)
-
+        # Default to center crop if no face data
+        crop_x = (original_width - target_width) // 2
+        
+        # Get the face coordinates for this frame if available
+        if frame_idx < len(Frames):
+            try:
+                x1, y1, x2, y2 = Frames[frame_idx]
+                face_center_x = (x1 + x2) // 2
+                
+                # Calculate ideal crop position to center the face horizontally
+                ideal_crop_x = face_center_x - (target_width // 2)
+                
+                # Check if we can center the face without exceeding video bounds
+                if ideal_crop_x < 0:
+                    # Face is too far left, align crop with left edge
+                    crop_x = 0
+                elif ideal_crop_x + target_width > original_width:
+                    # Face is too far right, align crop with right edge
+                    crop_x = original_width - target_width
+                else:
+                    # Face can be perfectly centered
+                    crop_x = ideal_crop_x
+                
+                # Smooth transition (reduces rapid jumps)
+                if frame_idx > 0:
+                    max_movement = target_width // 10  # Max 1/10th of frame width per frame for smoother motion
+                    crop_x = max(prev_crop_x - max_movement, 
+                               min(prev_crop_x + max_movement, crop_x))
+                
+                prev_crop_x = crop_x
+                
+            except Exception as e:
+                print(f"⚠️ Warning in frame {frame_idx}: {str(e)}")
+                crop_x = prev_crop_x  # Use previous position if error occurs
+        
+        # Ensure crop_x is within bounds (sanity check)
+        crop_x = max(0, min(crop_x, original_width - target_width))
+        
+        # Crop the frame
+        cropped_frame = frame[0:target_height, crop_x:crop_x + target_width]
+        
+        # Ensure output dimensions match exactly (should always be true, but just in case)
+        if cropped_frame.shape[1] != target_width or cropped_frame.shape[0] != target_height:
+            cropped_frame = cv2.resize(cropped_frame, (target_width, target_height))
+        
+        # Write the frame
         out.write(cropped_frame)
-
+        
+        # Print progress
+        if (frame_idx + 1) % 30 == 0:  # Every second at 30fps
+            print(f"Processed {frame_idx + 1}/{total_frames} frames (x={crop_x})")
+    
+    # Clean up
     cap.release()
     out.release()
-    print("Cropping complete. The video has been saved to", output_video_path, count)
+    
+    print(f"\n✅ Cropping complete. Video saved to {output_video_path}")
+    print(f"Processed {frame_idx + 1} frames in total")
+    
+    return True
 
 
 
