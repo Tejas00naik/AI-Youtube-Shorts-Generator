@@ -86,6 +86,9 @@ def detect_faces_and_speakers(input_video_path, output_video_path):
                 Add.append([[x, y, x1, y1], lip_distance])
 
                 MaxDif == max(lip_distance, MaxDif)
+        # Track the active speaker's face coordinates
+        active_speaker_face = None
+        
         for i in range(detections.shape[2]):
             confidence = detections[0, 0, i, 2]
             if confidence > 0.3:  # Confidence threshold
@@ -104,20 +107,30 @@ def detect_faces_and_speakers(input_video_path, output_video_path):
                 # Combine visual and audio cues
                 if lip_distance >= MaxDif and is_speaking_audio:  # Adjust the threshold as needed
                     cv2.putText(frame, "Active Speaker", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    active_speaker_face = [x, y, x1, y1]  # Save the active speaker's face
+                
                 if lip_distance >= MaxDif:
+                    if not active_speaker_face:  # If no active speaker was detected, use this face
+                        active_speaker_face = [x, y, x1, y1]
                     break
 
-        Frames.append([x, y, x1, y1])
+        # If no faces were detected at all, use a default box in the middle of the frame
+        if detections.shape[2] == 0 or active_speaker_face is None:
+            center_x = w // 2
+            center_y = h // 2
+            box_width = w // 3
+            box_height = h // 3
+            active_speaker_face = [center_x - box_width//2, center_y - box_height//2, 
+                                  center_x + box_width//2, center_y + box_height//2]
+        
+        # Append the face coordinates to the Frames list
+        Frames.append(active_speaker_face)
 
+        # Write the frame to the output file without trying to show it
         out.write(frame)
-        cv2.imshow('Frame', frame)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
 
     cap.release()
     out.release()
-    cv2.destroyAllWindows()
     os.remove(temp_audio_path)
 
 
