@@ -19,6 +19,9 @@ import time
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Import the existing YouTube downloader
+from Components.YoutubeDownloader import download_youtube_video
+
 from shorts_pipeline import ShortsGenerator
 from core.error_handler import Result
 from youtube_shorts_generator import extract_youtube_transcript
@@ -26,6 +29,7 @@ from llm.narrative_planner_v2 import generate_narrative_plan
 from media.clip_selector import select_best_clips
 from llm.script_writer import write_pause_texts
 from media.director_agent import assemble_video
+from media.clip_validator import ClipValidator
 
 
 def extract_video_id(youtube_url):
@@ -200,19 +204,11 @@ def test_components(youtube_url, user_prompt, tone="dramatic", clip_count=None):
             print(f"Downloading video {video_id}...")
             
             try:
-                from pytubefix import YouTube
-                url = f"https://www.youtube.com/watch?v={video_id}"
-                yt = YouTube(url)
-                stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-                
-                if not stream:
-                    print("No suitable video stream found")
-                    return
-                
-                # Download the video
-                downloaded_path = stream.download(output_path=str(working_dir), 
-                                                filename=f"{video_id}.mp4")
-                print(f"Downloaded video to {downloaded_path}")
+                from pytube import YouTube
+                yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
+                stream = yt.streams.filter(progressive=True, file_extension='mp4').get_highest_resolution()
+                stream.download(output_path=str(working_dir), filename=f"{video_id}.mp4")
+                print(f"Downloaded video to {video_path}")
                 
             except Exception as e:
                 print(f"Error downloading video: {str(e)}")
@@ -220,28 +216,62 @@ def test_components(youtube_url, user_prompt, tone="dramatic", clip_count=None):
         else:
             print(f"\nVideo already exists at {video_path}")
         
-        # Step 5: Select best clips
+        # Step 5: Select optimal clips from the video
         print("\n[COMPONENT 3: CLIP SELECTION]")
         print("Selecting the best video clips that match the narrative plan...")
         
-        # Save clip selector input
+        # Ensure the video is downloaded locally
+        if video_id:
+            video_path = working_dir / f"{video_id}.mp4"  # _working/VIDEO_ID.mp4
+            
+            # Check if video already exists
+            if not video_path.exists():
+                # We need to download it
+                try:
+                    # Use the existing download function from Components.YoutubeDownloader
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    downloaded_path = download_youtube_video(video_url)
+                    
+                    # Move the file to the working directory with the expected name
+                    import shutil
+                    shutil.copy(downloaded_path, str(video_path))
+                    print(f"Downloaded video to {video_path}")
+                except Exception as e:
+                    print(f"Error downloading video: {str(e)}")
+                    return
+            else:
+                print(f"Video already exists at {video_path}")
+        else:
+            print("No video ID provided, skipping clip selection")
+            return
+            
+        # First validate the narrative plan against video constraints
+        print("Validating narrative plan against video constraints...")
+        validation_result = ClipValidator.validate_narrative_plan(narrative_plan, str(video_path))
+        
+        if not validation_result.is_success:
+            print(f"Error validating narrative plan: {validation_result.error}")
+            return
+            
+        # Use the validated plan
+        validated_plan = validation_result.value
+        print("Narrative plan successfully validated and adjusted to fit video constraints")
+            
+        # Save clip selector input with validated plan
         clip_selector_input = {
-            "video_path": str(video_path),
-            "narrative_plan": narrative_plan
+            "narrative_plan": validated_plan,
+            "video_path": str(video_path) 
         }
         with open(test_dir / "clip_selector_input.json", "w") as f:
             json.dump(clip_selector_input, f, indent=2)
         
-        # Select clips
-        clips_result = select_best_clips(
-            str(video_path),
-            narrative_plan
-        )
+        # Select clips using validated plan
+        clips_result = select_best_clips(str(video_path), validated_plan)
         
         if not clips_result.is_success:
             print(f"Error selecting clips: {str(clips_result.error)}")
             return
-        
+            
         clips_data = clips_result.value
         with open(test_dir / "selected_clips_output.json", "w") as f:
             json.dump(clips_data, f, indent=2)
@@ -249,10 +279,10 @@ def test_components(youtube_url, user_prompt, tone="dramatic", clip_count=None):
         print(f"Selected {len(clips_data['clips'])} clips from the video")
         print(f"Selected clips saved to: {test_dir / 'selected_clips_output.json'}")
         
-        # Print a summary of the selected clips
+        # Print a summary of the clips
         print("\nSelected Clips Summary:")
         for i, clip in enumerate(clips_data['clips']):
-            print(f"Clip {i+1}: {clip['start']:.1f}s to {clip['end']:.1f}s ({clip['end']-clip['start']:.1f}s duration)")
+            print(f"Clip {i+1}: {clip['start_time']:.1f}s to {clip['end_time']:.1f}s ({clip['duration']:.1f}s duration)")
         
         # Step 6: Create clip contexts for the script writer
         clip_contexts = []

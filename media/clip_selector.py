@@ -9,9 +9,12 @@ import os
 import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
-import cv2
-import numpy as np
+from pathlib import Path
 
+import numpy as np
+from moviepy.editor import VideoFileClip
+
+from media.clip_validator import ClipValidator
 from core.error_handler import Result
 
 # Configure logging
@@ -26,41 +29,67 @@ class ClipSelector:
         """Initialize the clip selector."""
         self.openai_client = openai_client
         
-    def select_clips(self, video_path: str, narrative_plan: Dict[str, Any]) -> Result:
+    def select_clips(self, video_path: str, narrative_plan: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Select the best clips from a video based on the narrative plan.
+        Select clips from the video based on the narrative plan.
+        First validates the plan against video constraints to avoid
+        overlapping clips and ensure all clips fit within video duration.
         
         Args:
-            video_path: Path to the video file
-            narrative_plan: The narrative plan with action segments
+            video_path: Path to the source video file
+            narrative_plan: The narrative plan with segments
             
         Returns:
-            Result object with optimized clips or error
+            Dict with selected clips information
         """
-        # Validate inputs
-        if not os.path.exists(video_path):
-            return Result.failure(f"Video file not found: {video_path}")
+        # Validate and adjust the narrative plan against video constraints
+        validation_result = ClipValidator.validate_narrative_plan(narrative_plan, video_path)
+        
+        if not validation_result.is_success:
+            logger.error(f"Clip validation failed: {validation_result.error}")
+            raise ValueError(f"Clip validation error: {validation_result.error}")
             
-        if not isinstance(narrative_plan, dict) or "segments" not in narrative_plan:
-            return Result.failure("Invalid narrative plan format")
+        # Use the validated and adjusted narrative plan
+        validated_plan = validation_result.value
         
-        # Extract action segments from narrative plan
-        action_segments = [s for s in narrative_plan["segments"] if s["type"] == "action"]
+        # Get video properties (already done by validator, but needed here too)
+        video = VideoFileClip(video_path)
+        fps = video.fps if video.fps else 30  # Default to 30 if not available
         
-        if not action_segments:
-            return Result.failure("No action segments found in narrative plan")
+        # Extract clips based on validated narrative plan
+        clips = []
+        for segment in validated_plan.get('segments', []):
+            if segment['type'] == 'action':
+                start_time = segment['start_time']
+                end_time = segment['end_time']
+                
+                # Add a small buffer at the end to ensure complete speech
+                speech_completion_buffer = 0.5  # 0.5 seconds
+                if end_time + speech_completion_buffer <= video.duration:
+                    end_time += speech_completion_buffer
+                
+                clip_data = {
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'duration': end_time - start_time,
+                    'content': segment.get('content', '')
+                }
+                clips.append(clip_data)
         
-        # Try to use OpenAI API if available
-        if self.openai_client:
-            try:
-                return self._select_with_llm(video_path, narrative_plan, action_segments)
-            except Exception as e:
-                logger.error(f"LLM clip selection failed: {str(e)}")
-                logger.warning("Falling back to default clip selection")
+        video.close()
         
-        # Fallback to basic clip analysis
-        return self._select_clips_with_analysis(video_path, action_segments)
-    
+        result = {
+            'clips': clips,
+            'video_path': video_path,
+            'fps': fps
+        }
+        
+        # Log the selected clips for debugging
+        for i, clip in enumerate(clips):
+            logger.info(f"Clip {i+1}: {clip['start_time']:.1f}s to {clip['end_time']:.1f}s ({clip['duration']:.1f}s duration)")
+        
+        return result
+
     def _select_with_llm(self, video_path: str, narrative_plan: Dict[str, Any], 
                        action_segments: List[Dict[str, Any]]) -> Result:
         """Select clips using LLM assistance."""
@@ -265,4 +294,5 @@ def select_best_clips(video_path: str, narrative_plan: Dict[str, Any],
         Result object with optimized clips or error
     """
     selector = get_clip_selector(openai_client)
+    # Pass parameters in the right order (video_path, narrative_plan) as expected by select_clips
     return selector.select_clips(video_path, narrative_plan)

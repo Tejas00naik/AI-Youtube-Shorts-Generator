@@ -12,6 +12,8 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from core.error_handler import Result
 from llm.llm_client import get_llm_client
+from llm.script_validator import ScriptValidator
+from llm.prompt_templates import SCRIPT_WRITER_PROMPT
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -21,9 +23,10 @@ class ScriptWriter:
     Generates pause screen text for narrative plans based on clip contexts.
     """
     
-    def __init__(self, llm_client=None):
+    def __init__(self, llm_client=None, script_validator=None):
         """Initialize the script writer."""
         self.llm_client = llm_client
+        self.script_validator = script_validator or ScriptValidator()
     
     def write_pause_texts(self, narrative_plan: Dict[str, Any], 
                          clip_contexts: List[Dict[str, Any]],
@@ -52,9 +55,54 @@ class ScriptWriter:
         if not pause_segments:
             return Result.failure("No pause segments found in narrative plan")
         
-        # Try to use LLM API if available
-        if self.llm_client and self.llm_client.is_available():
+        # Extract video topic from clip contexts to provide better context for text generation
+        video_topic = ""
+        if clip_contexts and len(clip_contexts) > 0:
+            # Try to form a topic from the first clip's content
+            first_clip = clip_contexts[0]
+            if 'content' in first_clip and first_clip['content']:
+                # Use the first 50 chars of content as topic hint
+                video_topic = first_clip['content'][:50] + "..."
+        
+        # If we couldn't extract a topic, use a generic one based on clips count
+        if not video_topic and clip_contexts:
+            video_topic = f"A {len(clip_contexts)}-part video with {tone} tone"
+            
+        # Format the system prompt using our viral template
+        system_prompt = SCRIPT_WRITER_PROMPT.format(
+            video_topic=video_topic,
+            interruption_frequency=len(pause_segments),
+            tone=tone
+        )
+
+        # Define validation criteria for text overlays
+        validation_criteria = [
+            f"Exactly {len(pause_segments)} text overlays",
+            f"Each text is 40 characters or less",
+            f"Texts follow the strategic placement: opening context, minimal mid-video, closing CTA",
+            f"All texts are in the {tone} tone",
+            f"JSON format is correct with required fields: text, position, duration",
+            f"Duration of each text is 2.5 seconds",
+            f"Position for each text is 'bottom_center'"
+        ]
+        
+        # Use the script validator to generate and validate the text overlays
+        validation_result = self.script_validator.generate_and_validate_text_overlays(
+            system_prompt=system_prompt,
+            user_messages=f"Generate {len(pause_segments)} text overlays for this {tone} video",
+            validation_criteria=validation_criteria,
+            max_attempts=3
+        )
+        
+        if validation_result.is_success:
+            logger.info("Successfully generated and validated text overlays")
+            return validation_result
+            
+        # Validation failed, try standard LLM if available
+        logger.warning(f"Validation failed: {validation_result.error}")
+        if self.llm_client:
             try:
+                logger.info("Attempting generation with standard LLM")
                 return self._write_texts_with_llm(pause_segments, clip_contexts, tone)
             except Exception as e:
                 logger.error(f"LLM text generation failed: {str(e)}")
@@ -67,19 +115,25 @@ class ScriptWriter:
                             clip_contexts: List[Dict[str, Any]], 
                             tone: str) -> Result:
         """Generate pause texts using LLM."""
-        system_prompt = f'''
-        Write pause screen text for:
-        {json.dumps(clip_contexts, indent=2)}
+        # Extract video topic from clip contexts to provide better context for text generation
+        video_topic = ""
+        if clip_contexts and len(clip_contexts) > 0:
+            # Try to form a topic from the first clip's content
+            first_clip = clip_contexts[0]
+            if 'content' in first_clip and first_clip['content']:
+                # Use the first 50 chars of content as topic hint
+                video_topic = first_clip['content'][:50] + "..."
         
-        Rules:
-        1. Match tone: {tone}
-        2. Tease next clip's value
-        3. Use numbers/statistics when possible
-        4. 12-15 words max
-        
-        Example:
-        "3 costly mistakes 90% founders make →"
-        '''
+        # If we couldn't extract a topic, use a generic one based on clips count
+        if not video_topic and clip_contexts:
+            video_topic = f"A {len(clip_contexts)}-part video with {tone} tone"
+            
+        # Format the system prompt using our viral template
+        system_prompt = SCRIPT_WRITER_PROMPT.format(
+            video_topic=video_topic,
+            interruption_frequency=len(pause_segments),
+            tone=tone
+        )
         
         try:
             # Make API call using generic LLM client

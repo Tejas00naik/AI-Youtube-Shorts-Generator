@@ -8,7 +8,11 @@ using a more structured contract-based approach.
 import os
 import json
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+import re
+from typing import Dict, List, Any, Optional, Union, Tuple
+
+from llm.prompt_templates import NARRATIVE_PLANNER_PROMPT
+from llm.script_validator import ScriptValidator
 
 from core.error_handler import Result
 from core.config import get_config
@@ -18,13 +22,17 @@ logger = logging.getLogger(__name__)
 
 class NarrativePlannerV2:
     """
-    Narrative Planner that creates an alternating sequence of 
-    action clips and narration pauses for a YouTube Short.
+    Generates narrative plans for AI YouTube Shorts Generator.
+    
+    This class is responsible for planning the structure of a short-form video,
+    including which segments of the source video to use and where to insert
+    pauses for text overlays or narration.
     """
     
-    def __init__(self, openai_client=None):
+    def __init__(self, openai_client=None, script_validator=None):
         """Initialize the narrative planner."""
         self.openai_client = openai_client
+        self.script_validator = script_validator or ScriptValidator()
         self.config = get_config()
     
     def generate_plan(self, transcript: str, user_directions: str, 
@@ -48,22 +56,32 @@ class NarrativePlannerV2:
         Returns:
             Result object with the narrative plan or error
         """
-        # Auto-determine clip count if not specified (based on transcript length)
+        # Set default clip count to 2 if not specified, unless the transcript is very long
         if clip_count is None:
-            # Simple heuristic: ~5 words per second, aiming for ~7 sec clips
+            # Simple heuristic to check if transcript is long enough to justify more clips
             word_count = len(transcript.split())
             estimated_duration = word_count / 5  # in seconds
-            clip_count = min(max(3, int(estimated_duration / 15)), 6)  # Between 3-6 clips
+            
+            # Default to 2 clips, increase only for longer videos
+            if estimated_duration > 30:
+                clip_count = min(max(2, int(estimated_duration / 20)), 4)  # Between 2-4 clips
+            else:
+                clip_count = 2  # Default to 2 clips for shorter videos
+                
             logger.info(f"Auto-determined clip count: {clip_count}")
             
-        # Auto-determine interruption frequency if not specified
+        # Set default interruption frequency to max 2 if not specified
         if interruption_frequency is None:
             if interruption_style == "pause":
-                # Default: one less than clip count (pauses between clips)
-                interruption_frequency = clip_count - 1
+                # Default: at most 2 interruptions (intro hook and optional outro)
+                # When clip_count is 2, use 1 interruption (just the hook)
+                # When clip_count is 3+, use 2 interruptions (hook and outro)
+                interruption_frequency = min(2, clip_count - 1) if clip_count > 2 else 1
             else:
                 # Continuous style has no interruptions
                 interruption_frequency = 0
+                
+            logger.info(f"Set interruption frequency to: {interruption_frequency}")
                 
         # Validate max duration
         if max_duration is None or max_duration > 60.0:
@@ -71,66 +89,51 @@ class NarrativePlannerV2:
             
         logger.info(f"Using clip_count={clip_count}, style={interruption_style}, interruptions={interruption_frequency}, max_duration={max_duration}")
             
-        # Build the system prompt based on interruption style
-        if interruption_style == "continuous":
-            # Continuous style: no text interruptions
-            system_prompt = f'''
-            You're a YouTube Shorts director analyzing this podcast/video:
-            {transcript}
+        # Calculate the duration for the first hook segment (first 0-3s typically)
+        first_segment = 3.0
+        
+        # Format the system prompt using our viral content template
+        system_prompt = NARRATIVE_PLANNER_PROMPT.format(
+            user_directions=user_directions,
+            transcript=transcript,
+            clip_count=clip_count,
+            tone=tone,
+            interruption_style=interruption_style,
+            interruption_frequency=interruption_frequency,
+            max_duration=max_duration,
+            first_segment=first_segment
+        )
             
-            Create a continuous {clip_count}-clip narrative without interruptions.
-            - Action Clips: {clip_count} clips, each 5-10s
-            - No text interruptions between clips
-            
-            User directions: {user_directions}
-            Tone: {tone}
-            
-            Rules:
-            1. Total duration: {max_duration-5}-{max_duration}s
-            2. Select the most engaging moments
-            3. Ensure narrative flow between clips
-            
-            Return JSON:
-            {{
-              "segments": [
-                {{"type": "action", "start": float, "end": float}},
-                {{"type": "action", "start": float, "end": float}},
-                ...
-              ]
-            }}
-            '''
-        else:
-            # Pause style: text interruptions between clips
-            system_prompt = f'''
-            You're a YouTube Shorts director analyzing this podcast/video:
-            {transcript}
-            
-            Create a narrative with {clip_count} action clips and {interruption_frequency} text interruptions:
-            - Action Clips: speaker footage, 5-8s each
-            - Text Pauses: overlay text, 2-3s each
-            
-            User directions: {user_directions}
-            Tone: {tone}
-            
-            Rules:
-            1. Total duration: {max_duration-5}-{max_duration}s
-            2. {'Start and end with action clips' if interruption_frequency < clip_count else 'Alternate between action and pause'}
-            3. Pauses must explain next clip's value
-            4. Text under 15 words, no markdown
-            
-            Return JSON:
-            {{
-              "segments": [
-                {{"type": "action", "start": float, "end": float}},
-                {{"type": "pause", "text": "Hook: Why startups fail", "duration": 2.5}},
-                ...
-              ]
-            }}
-            '''
-            
-        # Try to use OpenAI API if available
+        # Define validation criteria for narrative plans
+        validation_criteria = [
+            f"Exactly {clip_count} action segments with appropriate start and end times",
+            f"Exactly {interruption_frequency} interruption segments of type '{interruption_style}'",
+            f"Total duration does not exceed {max_duration} seconds",
+            "Segments alternate appropriately based on the interruption style",
+            "First segment is an action segment with start_time of 0.0",
+            "Content segments use actual text from the transcript",
+            "No overlapping timestamps between segments - each clip must end before the next begins",
+            "Each clip should include complete thoughts/sentences",
+            "Each clip should end 0.5-1.0 seconds after the speaker completes their sentence"
+        ]
+        
+        # Use the script validator to generate and validate the narrative plan
+        validation_result = self.script_validator.generate_and_validate_narrative_plan(
+            system_prompt=system_prompt,
+            user_messages="Generate a narrative plan as specified",
+            validation_criteria=validation_criteria,
+            max_attempts=3
+        )
+        
+        if validation_result.is_success:
+            logger.info("Successfully generated and validated narrative plan")
+            return validation_result
+        
+        # Validation failed, try OpenAI if available
+        logger.warning(f"Validation failed: {validation_result.error}")
         if self.openai_client:
             try:
+                logger.info("Attempting generation with OpenAI")
                 return self._generate_with_llm(system_prompt)
             except Exception as e:
                 logger.error(f"LLM generation failed: {str(e)}")

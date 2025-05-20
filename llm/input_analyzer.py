@@ -10,6 +10,8 @@ import json
 import logging
 from typing import Dict, Any, Tuple, Optional
 
+from llm.prompt_templates import INPUT_ANALYZER_PROMPT
+
 from core.error_handler import Result
 from llm.llm_client import LLMClient
 
@@ -90,22 +92,14 @@ class InputAnalyzer:
     
     def _analyze_with_llm(self, prompt: str, transcript_length: int) -> Dict[str, Any]:
         """Use LLM to analyze the prompt and determine optimal parameters."""
-        system_prompt = f"""
-        Analyze the user's video creation prompt and determine optimal parameters.
+        # Calculate approximate duration from transcript length
+        transcript_length_seconds = transcript_length / 20  # Simple heuristic
         
-        Context:
-        - Source transcript length: {transcript_length} characters (approx. {transcript_length//20} seconds of content)
-        - We need to generate a short-form vertical video (max 60 seconds)
-        - Parameters need to work together coherently
-        
-        Determine the following parameters:
-        1. clip_count: Number of video clips to include (3-8 recommended)
-        2. interruption_style: Whether to use 'pause' (text overlays between clips) or 'continuous' (no interruptions)
-        3. interruption_frequency: For 'pause' style, how many pauses to include (usually clip_count - 1)
-        4. max_duration: Target maximum duration in seconds (10-60)
-        
-        Format your response as valid JSON with these keys.
-        """
+        # Format the system prompt using our template
+        system_prompt = INPUT_ANALYZER_PROMPT.format(
+            user_input=prompt,
+            transcript_length_seconds=transcript_length_seconds
+        )
         
         try:
             response = self.llm_client.chat_completion(

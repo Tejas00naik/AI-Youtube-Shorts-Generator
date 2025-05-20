@@ -1,0 +1,52 @@
+===== VARUN MAYA STARTUP ADVICE REELS SCRIPT =====
+Duration: 30 seconds
+Created: May 20, 2025
+
+----- SEGMENT 1: HOOK (0-10s) -----
+[TEXT OVERLAY]: "90% of startups FAIL within their first year..."
+
+[NARRATION - Urgent, dramatic tone]:
+"Are you risking EVERYTHING on your startup? Thousands of founders lose their life savings every year because they didn't know these critical mistakes..."
+
+[VISUALS]: 
+- Quick clips of stressed founders, closing offices
+- Highlight specific failure statistics from Varun's video
+- Show brief clip of Varun speaking passionately about mistakes
+
+----- SEGMENT 2: KEY POINTS (10-20s) -----
+[NARRATION - Informative tone]:
+"Varun Maya reveals three game-changing insights:"
+
+[VISUALS/CLIPS]:
+1. [SHOW CLIP]: Varun explaining why market fit matters more than product obsession
+   [TEXT OVERLAY]: "Founders obsess over product, not customers"
+
+2. [SHOW CLIP]: Varun discussing importance of managing burn rate
+   [TEXT OVERLAY]: "Control your runway or crash"
+
+3. [SHOW CLIP]: Varun talking about building the right team
+   [TEXT OVERLAY]: "Your first 10 hires determine your success"
+
+----- SEGMENT 3: CALL TO ACTION (20-30s) -----
+[NARRATION - Encouraging tone]:
+"Varun Maya has built multiple successful startups and now shares his hard-earned wisdom. Don't learn these lessons the expensive way."
+
+[VISUALS]:
+- Show Varun's successful moments
+- Brief testimonials or results
+- Highlight his credentials/achievements
+
+[TEXT OVERLAY]: 
+"Follow @VarunMaya for more startup insights"
+"Save this video if you're building something amazing"
+
+[FINAL NARRATION]:
+"Smart founders learn from others' mistakes. Be one of them."
+
+===== EDITING NOTES =====
+- Use fast-paced transitions between points
+- Add dramatic music for hook segment
+- Switch to upbeat, inspirational music for key points and call to action
+- Use screen zooms and emphasis effects for key statistics
+- Add captions throughout for accessibility and engagement
+- Use pattern interrupts (quick visual changes) to maintain attention
