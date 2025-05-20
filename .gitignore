@@ -1,6 +1,24 @@
 # Python-related
-*.pyc
-**/__pycache__/
+*.py[cod]
+*$py.class
+__pycache__/
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
 # Media Files
 *.wav
@@ -8,15 +26,55 @@
 *.gif
 *.mp4
 *.webm
+*.mov
+*.avi
+*.flv
+*.wmv
+*.m4a
+*.m4v
+*.mpg
+*.mpeg
+*.m2v
+*.mkv
+*.flac
+*.aac
+*.ogg
+*.wma
+*.m4p
+*.DS_Store
 
 # Virtual environment
 venv/
+ENV/
+env/
+.venv/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
-debug_crops
+# Debug files
+debug_*/
+*.log
+logs/
 
-debug_snapshots
+# Project specific
+debug_crops/
+debug_snapshots/
+temp_*
+output/
 
-temp_audio.wav
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# System Files
+.DS_Store
+Thumbs.db
