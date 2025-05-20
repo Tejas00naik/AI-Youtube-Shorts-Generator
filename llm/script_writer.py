@@ -11,6 +11,7 @@ import logging
 from typing import Dict, Any, List, Optional, Tuple
 
 from core.error_handler import Result
+from llm.llm_client import get_llm_client
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -20,9 +21,9 @@ class ScriptWriter:
     Generates pause screen text for narrative plans based on clip contexts.
     """
     
-    def __init__(self, openai_client=None):
+    def __init__(self, llm_client=None):
         """Initialize the script writer."""
-        self.openai_client = openai_client
+        self.llm_client = llm_client
     
     def write_pause_texts(self, narrative_plan: Dict[str, Any], 
                          clip_contexts: List[Dict[str, Any]],
@@ -33,7 +34,7 @@ class ScriptWriter:
         Args:
             narrative_plan: The narrative plan with action and pause segments
             clip_contexts: List of clip contexts with transcripts and metadata
-            tone: Tone of the texts (professional, casual, fun, etc.)
+            tone: Tone of the texts
             
         Returns:
             Result object with pause texts or error
@@ -51,8 +52,8 @@ class ScriptWriter:
         if not pause_segments:
             return Result.failure("No pause segments found in narrative plan")
         
-        # Try to use OpenAI API if available
-        if self.openai_client:
+        # Try to use LLM API if available
+        if self.llm_client and self.llm_client.is_available():
             try:
                 return self._write_texts_with_llm(pause_segments, clip_contexts, tone)
             except Exception as e:
@@ -81,22 +82,58 @@ class ScriptWriter:
         '''
         
         try:
-            # Make API call
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[{"role": "system", "content": system_prompt}],
+            # Make API call using generic LLM client
+            response = self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_messages="Generate pause screen texts based on the provided context",
                 temperature=0.7,
-                response_format={ "type": "json_object" }
+                json_response=True
             )
             
+            # Check for errors
+            if "error" in response:
+                return Result.failure(f"LLM API error: {response['error']}")
+            
             # Parse response
-            response_text = response.choices[0].message.content.strip()
+            response_text = response["content"].strip()
             texts_data = json.loads(response_text)
+            
+            # Handle different JSON formats returned by different LLM providers
+            # DeepSeek might not return data with the expected 'texts' key format
+            if "texts" not in texts_data and isinstance(texts_data, list):
+                # If we got a list of text entries, wrap in the expected format
+                texts_data = {"texts": texts_data}
+            elif "pause_screens" in texts_data:
+                # Handle DeepSeek's specific format with 'pause_screens'
+                logger.info("Converting DeepSeek 'pause_screens' format to standard format")
+                if isinstance(texts_data["pause_screens"], list):
+                    texts_data = {"texts": texts_data["pause_screens"]}
+                else:
+                    # If it's a dict with numbered keys like "1", "2", etc.
+                    texts = []
+                    for _, value in sorted(texts_data["pause_screens"].items()):
+                        if isinstance(value, str):
+                            texts.append({"text": value, "duration": 2.5, "position": "bottom_center"})
+                        elif isinstance(value, dict) and "text" in value:
+                            texts.append(value)
+                    texts_data = {"texts": texts}
+            elif "texts" not in texts_data and isinstance(texts_data, dict) and any(key.startswith("text") for key in texts_data.keys()):
+                # If we have text entries directly in the dict with keys like "text1", "text2", etc.
+                texts = []
+                for key, value in texts_data.items():
+                    if isinstance(value, str):
+                        texts.append({"text": value, "duration": 2.5, "position": "bottom_center"})
+                    elif isinstance(value, dict) and "text" in value:
+                        texts.append(value)
+                texts_data = {"texts": texts}
+            
+            # Log the received format for debugging
+            logger.info(f"Received text format: {texts_data.keys() if isinstance(texts_data, dict) else 'list'}")
             
             # Validate the texts
             validation_result = self._validate_texts_contract(texts_data)
             if not validation_result.is_success:
-                logger.error(f"LLM-generated texts failed validation: {validation_result.error.message}")
+                logger.error(f"LLM-generated texts failed validation: {str(validation_result.error)}")
                 return validation_result
             
             return Result.success(texts_data)
@@ -230,17 +267,19 @@ class ScriptWriter:
 # Singleton instance
 _script_writer = None
 
-def get_script_writer(openai_client=None) -> ScriptWriter:
+def get_script_writer(llm_client=None) -> ScriptWriter:
     """Get the singleton script writer instance."""
     global _script_writer
     if _script_writer is None:
-        _script_writer = ScriptWriter(openai_client)
+        _script_writer = ScriptWriter(llm_client)
     return _script_writer
 
 def write_pause_texts(narrative_plan: Dict[str, Any], 
                      clip_contexts: List[Dict[str, Any]],
                      tone: str = "professional",
-                     openai_client=None) -> Result:
+                     llm_provider: str = None,
+                     api_key: str = None,
+                     model: str = None) -> Result:
     """
     Convenience function to generate pause screen texts.
     
@@ -248,10 +287,19 @@ def write_pause_texts(narrative_plan: Dict[str, Any],
         narrative_plan: The narrative plan with action and pause segments
         clip_contexts: List of clip contexts with transcripts and metadata
         tone: Tone of the texts
-        openai_client: Optional OpenAI client instance
+        llm_provider: Optional LLM provider name (openai, deepseek, anthropic, local)
+        api_key: Optional API key for the LLM provider
+        model: Optional model name to use
         
     Returns:
         Result object with pause texts or error
     """
-    writer = get_script_writer(openai_client)
+    # Get LLM client with specified provider, if any
+    llm_client = get_llm_client(
+        provider=llm_provider,
+        api_key=api_key,
+        model=model
+    )
+    
+    writer = get_script_writer(llm_client)
     return writer.write_pause_texts(narrative_plan, clip_contexts, tone)

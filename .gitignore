@@ -58,12 +58,23 @@ env/
 debug_*/
 *.log
 logs/
+testing_logs/
 
 # Project specific
 debug_crops/
 debug_snapshots/
 temp_*
 output/
+_working/
+*.mp4
+
+# Test files and generated content
+*_transcript.txt
+*_narrative_plan.json
+*_clips.json
+*_texts.json
+simple_transcript_test.py
+chess_reel_test.py
 
 # IDE specific
 .idea/

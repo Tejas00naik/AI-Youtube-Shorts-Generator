@@ -18,6 +18,7 @@ from moviepy.editor import (
 
 from core.error_handler import Result
 from core.config import get_config
+from llm.llm_client import get_llm_client
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,9 +29,9 @@ class DirectorAgent:
     applying appropriate transitions and effects.
     """
     
-    def __init__(self, openai_client=None):
+    def __init__(self, llm_client=None):
         """Initialize the director agent."""
-        self.openai_client = openai_client
+        self.llm_client = llm_client
         self.config = get_config()
     
     def assemble_video(self, video_path: str, 
@@ -76,8 +77,8 @@ class DirectorAgent:
             video_name = Path(video_path).stem
             output_path = str(output_dir / f"{video_name}_shorts.mp4")
         
-        # Try to use OpenAI for direction if available
-        if self.openai_client:
+        # Try to use LLM for direction if available
+        if self.llm_client and self.llm_client.is_available():
             try:
                 # Get editing instructions from LLM
                 timeline_result = self._get_editing_timeline(clips, texts)
@@ -114,18 +115,20 @@ class DirectorAgent:
         '''
         
         try:
-            # Make API call
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": tech_prompt}
-                ],
+            # Make API call using generic LLM client
+            response = self.llm_client.chat_completion(
+                system_prompt=tech_prompt,
+                user_messages="Generate an editing timeline for the video",
                 temperature=0.3,
-                response_format={ "type": "json_object" }
+                json_response=True
             )
             
+            # Check for errors
+            if "error" in response:
+                return Result.failure(f"LLM API error: {response['error']}")
+                
             # Parse response
-            response_text = response.choices[0].message.content.strip()
+            response_text = response["content"].strip()
             timeline_data = json.loads(response_text)
             
             # Validate the timeline
@@ -442,18 +445,28 @@ class DirectorAgent:
 # Singleton instance
 _director_agent = None
 
-def get_director_agent(openai_client=None) -> DirectorAgent:
-    """Get the singleton director agent instance."""
+def get_director_agent(llm_client=None) -> DirectorAgent:
+    """
+    Get the singleton director agent instance.
+    
+    Args:
+        llm_client: Optional LLMClient instance
+        
+    Returns:
+        DirectorAgent instance
+    """
     global _director_agent
     if _director_agent is None:
-        _director_agent = DirectorAgent(openai_client)
+        _director_agent = DirectorAgent(llm_client)
     return _director_agent
 
 def assemble_video(video_path: str, 
                   clips_data: Dict[str, Any],
                   texts_data: Dict[str, Any],
                   output_path: Optional[str] = None,
-                  openai_client=None) -> Result:
+                  llm_provider: str = None,
+                  api_key: str = None,
+                  model: str = None) -> Result:
     """
     Convenience function to assemble a video from clips and texts.
     
@@ -462,10 +475,19 @@ def assemble_video(video_path: str,
         clips_data: Data about selected clips
         texts_data: Data about pause texts
         output_path: Optional path for output video
-        openai_client: Optional OpenAI client instance
+        llm_provider: Optional LLM provider name (openai, deepseek, anthropic, local)
+        api_key: Optional API key for the LLM provider
+        model: Optional model name to use
         
     Returns:
         Result object with output video path or error
     """
-    director = get_director_agent(openai_client)
+    # Get LLM client with specified provider, if any
+    llm_client = get_llm_client(
+        provider=llm_provider,
+        api_key=api_key,
+        model=model
+    )
+    
+    director = get_director_agent(llm_client)
     return director.assemble_video(video_path, clips_data, texts_data, output_path)

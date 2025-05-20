@@ -32,14 +32,15 @@ from llm.narrative_planner_v2 import generate_narrative_plan
 from media.clip_selector import select_best_clips
 from llm.script_writer import write_pause_texts
 from media.director_agent import assemble_video
+from llm.llm_client import get_llm_client, LLMProvider
 
-# Optional OpenAI integration
+# Make sure required modules are available
 try:
-    import openai
-    OPENAI_AVAILABLE = True
+    import requests
+    REQUESTS_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-    logger.warning("OpenAI module not available. Will use fallback generation methods.")
+    REQUESTS_AVAILABLE = False
+    logger.warning("Requests module not available. API calls may not work.")
 
 class ShortsGenerator:
     """
@@ -47,21 +48,38 @@ class ShortsGenerator:
     Implements the contract-based approach with staged validation.
     """
     
-    def __init__(self):
+    def __init__(self, llm_provider=None, api_key=None, model=None):
         """Initialize the shorts generator."""
         self.config = get_config()
-        self.openai_client = None
         
-        # Initialize OpenAI client if available
-        api_key = os.getenv("OPENAI_API_KEY")
-        if OPENAI_AVAILABLE and api_key:
-            try:
-                self.openai_client = openai.OpenAI(api_key=api_key)
-                logger.info("OpenAI client initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize OpenAI client: {str(e)}")
-        elif not api_key:
-            logger.warning("OPENAI_API_KEY not set. Using fallback generation methods.")
+        # Get LLM provider from args or environment
+        self.llm_provider = llm_provider or os.getenv("LLM_PROVIDER", "openai")
+        self.api_key = api_key
+        self.model = model
+        
+        # If API key not explicitly provided, look for it in environment
+        if not self.api_key:
+            if self.llm_provider.lower() == "openai":
+                self.api_key = os.getenv("OPENAI_API_KEY")
+            elif self.llm_provider.lower() == "deepseek":
+                self.api_key = os.getenv("DEEPSEEK_API_KEY")
+            elif self.llm_provider.lower() == "anthropic":
+                self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        
+        # Initialize LLM client
+        try:
+            self.llm_client = get_llm_client(
+                provider=self.llm_provider,
+                api_key=self.api_key,
+                model=self.model
+            )
+            if self.llm_client.is_available():
+                logger.info(f"{self.llm_provider.title()} client initialized successfully with model {self.llm_client.model}")
+            else:
+                logger.warning(f"Could not initialize {self.llm_provider} client. Using fallback methods.")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM client: {str(e)}")
+            self.llm_client = None
         
         # Initialize working directory
         self.working_dir = Path("_working")
@@ -152,7 +170,9 @@ class ShortsGenerator:
             user_directions, 
             clip_count=clip_count,
             tone=tone,
-            openai_client=self.openai_client
+            llm_provider=self.llm_provider,
+            api_key=self.api_key,
+            model=self.model
         )
         
         if not plan_result.is_success:
@@ -182,7 +202,9 @@ class ShortsGenerator:
         clips_result = select_best_clips(
             str(video_path),
             narrative_plan,
-            openai_client=self.openai_client
+            llm_provider=self.llm_provider,
+            api_key=self.api_key,
+            model=self.model
         )
         
         if not clips_result.is_success:
@@ -234,7 +256,9 @@ class ShortsGenerator:
             narrative_plan,
             clip_contexts,
             tone=tone,
-            openai_client=self.openai_client
+            llm_provider=self.llm_provider,
+            api_key=self.api_key,
+            model=self.model
         )
         
         if not texts_result.is_success:
@@ -262,7 +286,9 @@ class ShortsGenerator:
             clips_data,
             texts_data,
             str(output_path),
-            openai_client=self.openai_client
+            llm_provider=self.llm_provider,
+            api_key=self.api_key,
+            model=self.model
         )
         
         if not assembly_result.is_success:
@@ -294,6 +320,13 @@ def parse_arguments():
                        help="Optional number of clips to include")
     parser.add_argument('--output', '-o', type=str,
                        help="Output filename for the generated video")
+    parser.add_argument('--provider', '-p', type=str, default=os.getenv("LLM_PROVIDER", "openai"),
+                       choices=["openai", "deepseek", "anthropic", "local"],
+                       help="LLM provider to use")
+    parser.add_argument('--api-key', '-k', type=str,
+                       help="API key for the LLM provider (will use environment variable if not specified)")
+    parser.add_argument('--model', '-m', type=str,
+                       help="Model name to use with the LLM provider")
     
     return parser.parse_args()
 
@@ -305,8 +338,12 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         args = parse_arguments()
         
-        # Create generator and run pipeline
-        generator = ShortsGenerator()
+        # Create generator and run pipeline with specified LLM provider
+        generator = ShortsGenerator(
+            llm_provider=args.provider,
+            api_key=args.api_key,
+            model=args.model
+        )
         result = generator.generate_shorts(
             args.url,
             args.directions,
@@ -332,9 +369,14 @@ if __name__ == "__main__":
         print("Example usage:")
         print('  python shorts_pipeline.py --url "https://www.youtube.com/watch?v=VIDEO_ID" \\')
         print('                           --directions "Create a video highlighting the key insights" \\')
-        print('                           --tone fun --clips 3\n')
+        print('                           --tone fun --clips 3 --provider deepseek\n')
         print("Required packages:")
         print("  - pytube: for downloading YouTube videos")
         print("  - moviepy: for video processing")
-        print("  - openai: for LLM-powered generation (optional)")
+        print("  - requests: for API communication")
+        print("\nSupported LLM providers:")
+        print("  - openai: Uses OpenAI API (set OPENAI_API_KEY environment variable)")
+        print("  - deepseek: Uses DeepSeek API (set DEEPSEEK_API_KEY environment variable)")
+        print("  - anthropic: Uses Anthropic API (set ANTHROPIC_API_KEY environment variable)")
+        print("  - local: Uses a local LLM API endpoint (set LOCAL_API_URL environment variable)")
         print("\nUse --help for more information.")
